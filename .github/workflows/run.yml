@@ -1,0 +1,76 @@
+name: scheduled-run
+
+on:
+  schedule:
+    # Minutes after each publish slot (UTC 1,12,15,17,20,23); the bot picks its topic by UTC hour.
+    - cron: "3 1,12,15,17,20,23 * * *"
+  workflow_dispatch:
+    inputs:
+      wake_only:
+        description: "Only start the Studio and check SSH (no generation, no upload)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: studio-run
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Keep schedule enabled
+        # GitHub disables cron workflows after 60 days without repo activity.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/run.yml/enable" || true
+
+      - name: Start Studio
+        env:
+          LIGHTNING_API_KEY: ${{ secrets.LIGHTNING_API_KEY }}
+          LIGHTNING_USER_ID: ${{ secrets.LIGHTNING_USER_ID }}
+          STUDIO_NAME: ${{ secrets.STUDIO_NAME }}
+          STUDIO_TEAMSPACE: ${{ secrets.STUDIO_TEAMSPACE }}
+          STUDIO_ORG: ${{ secrets.STUDIO_ORG }}
+        run: |
+          pip install -q lightning-sdk
+          python - <<'PY'
+          import os, time
+          from lightning_sdk import Studio
+          s = Studio(name=os.environ["STUDIO_NAME"], teamspace=os.environ["STUDIO_TEAMSPACE"],
+                     org=os.environ["STUDIO_ORG"], create_ok=False)
+          print("status before:", s.status)
+          if str(s.status).split(".")[-1].lower() != "running":
+              s.start()
+          print("status after:", s.status)
+          PY
+
+      - name: Wait for SSH
+        env:
+          STUDIO_SSH_KEY: ${{ secrets.STUDIO_SSH_KEY }}
+          STUDIO_SSH_USER: ${{ secrets.STUDIO_SSH_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$STUDIO_SSH_KEY" > ~/.ssh/studio && chmod 600 ~/.ssh/studio
+          for i in $(seq 1 60); do
+            if ssh -i ~/.ssh/studio -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+                 "$STUDIO_SSH_USER@ssh.lightning.ai" 'echo up' 2>/dev/null | grep -q up; then
+              echo "SSH up after $i tries"; exit 0
+            fi
+            sleep 10
+          done
+          echo "SSH never came up"; exit 1
+
+      - name: Generate and upload
+        if: ${{ github.event_name == 'schedule' || !inputs.wake_only }}
+        env:
+          STUDIO_SSH_USER: ${{ secrets.STUDIO_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/studio -o BatchMode=yes -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+              "$STUDIO_SSH_USER@ssh.lightning.ai" 'bash ~/run_gen.sh'
