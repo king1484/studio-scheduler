@@ -2,8 +2,14 @@ name: scheduled-run
 
 on:
   schedule:
-    # Minutes after each publish slot (UTC 1,12,15,17,20,23); the bot picks its topic by UTC hour.
-    - cron: "3 1,12,15,17,20,23 * * *"
+    # Two triggers per publish slot (UTC 1,12,15,17,20,23). GitHub cron silently drops or
+    # heavily delays schedule events under load (both 09-29 slots at :03 were dropped
+    # outright), so each slot gets a backup trigger 30 minutes later. The bot picks its
+    # topic by UTC hour, so any minute inside the hour yields the same topic, and
+    # run_gen.sh's last_gen_ok marker turns the backup into a no-op when the primary
+    # already succeeded. Minutes deliberately off :00/:05 - the busiest cron windows.
+    - cron: "7 1,12,15,17,20,23 * * *"
+    - cron: "37 1,12,15,17,20,23 * * *"
   workflow_dispatch:
     inputs:
       wake_only:
